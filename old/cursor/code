@@ -1,0 +1,122 @@
+# 1. 데이터 전처리
+import pandas as pd
+   import numpy as np
+   from sklearn.model_selection import train_test_split
+   from transformers import AutoTokenizer
+   
+   # 데이터 로드
+   df = pd.read_csv('your_data.csv')
+   
+   # 텍스트 정제
+   def clean_text(text):
+       # 특수문자 제거
+       text = re.sub(r'[^\w\s]', '', text)
+       # 소문자 변환
+       text = text.lower()
+       # 불필요한 공백 제거
+       text = ' '.join(text.split())
+       return text
+   
+   # 토크나이저 초기화
+   tokenizer = AutoTokenizer.from_pretrained('klue/bert-base')
+   
+   # 문장 쌍 토크나이징
+   def tokenize_sentence_pair(sent1, sent2):
+       return tokenizer(
+           sent1,
+           sent2,
+           padding='max_length',
+           truncation=True,
+           max_length=128,
+           return_tensors='pt'
+       )
+
+  # 2. 데이터셋 구성
+     # 데이터셋 클래스 정의
+   class SentenceOrderDataset(Dataset):
+       def __init__(self, texts, labels, tokenizer):
+           self.texts = texts
+           self.labels = labels
+           self.tokenizer = tokenizer
+           
+       def __len__(self):
+           return len(self.texts)
+           
+       def __getitem__(self, idx):
+           text = self.texts[idx]
+           label = self.labels[idx]
+           
+           encoding = self.tokenizer(
+               text[0],
+               text[1],
+               padding='max_length',
+               truncation=True,
+               max_length=128,
+               return_tensors='pt'
+           )
+           
+           return {
+               'input_ids': encoding['input_ids'].squeeze(),
+               'attention_mask': encoding['attention_mask'].squeeze(),
+               'labels': torch.tensor(label, dtype=torch.long)
+           }
+
+# 3. 모델 아키텍쳐
+   from transformers import AutoModelForSequenceClassification
+   
+   class SentenceOrderModel(nn.Module):
+       def __init__(self, model_name):
+           super().__init__()
+           self.bert = AutoModelForSequenceClassification.from_pretrained(
+               model_name,
+               num_labels=2  # 순서가 맞는지 아닌지 이진 분류
+           )
+           
+       def forward(self, input_ids, attention_mask, labels=None):
+           outputs = self.bert(
+               input_ids=input_ids,
+               attention_mask=attention_mask,
+               labels=labels
+           )
+           return outputs
+
+  # 4. 학습 코드
+     from transformers import Trainer, TrainingArguments
+   
+   # 학습 인자 설정
+   training_args = TrainingArguments(
+       output_dir='./results',
+       num_train_epochs=3,
+       per_device_train_batch_size=16,
+       per_device_eval_batch_size=64,
+       warmup_steps=500,
+       weight_decay=0.01,
+       logging_dir='./logs',
+       logging_steps=10,
+   )
+   
+   # 트레이너 초기화
+   trainer = Trainer(
+       model=model,
+       args=training_args,
+       train_dataset=train_dataset,
+       eval_dataset=val_dataset
+   )
+   
+   # 학습 실행
+   trainer.train()
+
+  #5. 평가 및 추론
+   def predict_order(sent1, sent2):
+       inputs = tokenizer(
+           sent1,
+           sent2,
+           return_tensors='pt',
+           padding=True,
+           truncation=True,
+           max_length=128
+       )
+       
+       outputs = model(**inputs)
+       predictions = torch.softmax(outputs.logits, dim=1)
+       return predictions.argmax().item()
