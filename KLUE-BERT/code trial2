@@ -1,0 +1,209 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModel
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from tqdm import tqdm
+
+class SentencePairDataset(Dataset):
+    """문장쌍 데이터셋을 위한 커스텀 Dataset 클래스"""
+    def __init__(self, sentence1s, sentence2s, labels, tokenizer, max_length=128):
+        self.encodings = tokenizer(
+            sentence1s,
+            sentence2s,
+            add_special_tokens=True,
+            max_length=max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        self.labels = torch.tensor(labels, dtype=torch.long)
+
+    def __getitem__(self, idx):
+        item = {
+            'input_ids': self.encodings['input_ids'][idx],
+            'attention_mask': self.encodings['attention_mask'][idx],
+            'token_type_ids': self.encodings['token_type_ids'][idx],
+            'labels': self.labels[idx]
+        }
+        return item
+
+    def __len__(self):
+        return len(self.labels)
+
+class SentencePairClassifier(nn.Module):
+    """문장쌍 이진 분류를 위한 BERT 기반 분류기"""
+    def __init__(self, model_name='klue/bert-base'):
+        super().__init__()
+        # BERT 모델 초기화
+        self.bert = AutoModel.from_pretrained(model_name)
+        # 분류를 위한 선형 레이어
+        self.classifier = nn.Linear(self.bert.config.hidden_size, 1)
+        
+    def forward(self, input_ids, attention_mask, token_type_ids):
+        # BERT 모델을 통한 문장 임베딩 추출
+        outputs = self.bert(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids
+        )
+        # [CLS] 토큰의 임베딩 추출
+        cls_output = outputs.last_hidden_state[:, 0, :]
+        # 이진 분류 수행
+        logits = self.classifier(cls_output)
+        return logits.squeeze(-1)
+
+def train_epoch(model, train_loader, optimizer, criterion, device):
+    """한 에폭 동안의 학습을 수행하는 함수"""
+    model.train()
+    total_loss = 0
+    
+    for batch in tqdm(train_loader, desc='Training'):
+        # 배치 데이터를 디바이스로 이동
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        token_type_ids = batch['token_type_ids'].to(device)
+        labels = batch['labels'].to(device).float()
+
+        # 순전파
+        logits = model(input_ids, attention_mask, token_type_ids)
+        loss = criterion(logits, labels)
+        
+        # 역전파 및 최적화
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+    
+    return total_loss / len(train_loader)
+
+def evaluate(model, data_loader, criterion, device):
+    """모델 평가를 수행하는 함수"""
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch in data_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            token_type_ids = batch['token_type_ids'].to(device)
+            labels = batch['labels'].to(device).float()
+
+            logits = model(input_ids, attention_mask, token_type_ids)
+            loss = criterion(logits, labels)
+            total_loss += loss.item()
+            
+            preds = (torch.sigmoid(logits) > 0.5).long()
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    metrics = calculate_metrics(all_labels, all_preds)
+    return total_loss / len(data_loader), metrics
+
+def calculate_metrics(labels, preds):
+    """평가 메트릭을 계산하는 함수"""
+    return {
+        'accuracy': accuracy_score(labels, preds),
+        'precision': precision_score(labels, preds),
+        'recall': recall_score(labels, preds),
+        'f1': f1_score(labels, preds),
+        'confusion_matrix': confusion_matrix(labels, preds)
+    }
+
+def print_metrics(metrics):
+    """평가 메트릭을 출력하는 함수"""
+    print(f'Validation metrics:')
+    print(f'Accuracy: {metrics["accuracy"]:.4f}')
+    print(f'Precision: {metrics["precision"]:.4f}')
+    print(f'Recall: {metrics["recall"]:.4f}')
+    print(f'F1-score: {metrics["f1"]:.4f}')
+    print('Confusion Matrix:')
+    print(metrics['confusion_matrix'])
+
+def save_predictions(labels, preds, filename='predictions.csv'):
+    """예측 결과를 CSV 파일로 저장하는 함수"""
+    results_df = pd.DataFrame({
+        'true_label': labels,
+        'predicted_label': preds
+    })
+    results_df.to_csv(filename, index=False)
+
+def main():
+    # 데이터 로드
+    train_df = pd.read_csv('train.csv')
+    
+    # 데이터 분할
+    train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=42)
+
+    # 토크나이저 초기화
+    tokenizer = AutoTokenizer.from_pretrained('klue/bert-base')
+
+    # 데이터셋 생성
+    train_dataset = SentencePairDataset(
+        train_df['sentence1'].values,
+        train_df['sentence2'].values,
+        train_df['label'].values,
+        tokenizer
+    )
+    val_dataset = SentencePairDataset(
+        val_df['sentence1'].values,
+        val_df['sentence2'].values,
+        val_df['label'].values,
+        tokenizer
+    )
+
+    # 데이터로더 생성
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=16)
+
+    # 디바이스 설정
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
+
+    # 모델 초기화
+    model = SentencePairClassifier()
+    model = model.to(device)
+    
+    # 옵티마이저와 손실 함수 설정
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+    criterion = torch.nn.BCEWithLogitsLoss()
+    
+    # 학습 루프
+    num_epochs = 5
+    best_val_f1 = 0
+    
+    for epoch in range(num_epochs):
+        print(f'\nEpoch {epoch + 1}/{num_epochs}')
+        
+        # 학습
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        print(f'Average training loss: {train_loss:.4f}')
+        
+        # 검증
+        val_loss, metrics = evaluate(model, val_loader, criterion, device)
+        print(f'Average validation loss: {val_loss:.4f}')
+        print_metrics(metrics)
+        
+        # 최고 성능 모델 저장
+        if metrics['f1'] > best_val_f1:
+            best_val_f1 = metrics['f1']
+            torch.save(model.state_dict(), 'best_model.pth')
+    
+    # 최종 평가
+    print("\nFinal Evaluation:")
+    model.load_state_dict(torch.load('best_model.pth'))
+    _, final_metrics = evaluate(model, val_loader, criterion, device)
+    print_metrics(final_metrics)
+    
+    # 예측 결과 저장
+    save_predictions(val_df['label'].values, final_metrics['predictions'])
+
+if __name__ == '__main__':
+    main()
