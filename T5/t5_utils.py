@@ -1,7 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import T5ForConditionalGeneration, T5TokenizerFast, AutoTokenizer, AutoModelForSeq2SeqLM
-from transformers.generation.cache_utils import EncoderDecoderCache
 import numpy as np
 from sklearn.model_selection import train_test_split
 import json
@@ -192,9 +191,7 @@ class SentenceOrderPredictor:
                 attention_mask=inputs['attention_mask'],
                 max_length=8,
                 num_beams=4,
-                no_repeat_ngram_size=4,
-                use_cache=True,
-                past_key_values=None  # EncoderDecoderCache will be used internally
+                no_repeat_ngram_size=4
             )
             
             predicted_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
